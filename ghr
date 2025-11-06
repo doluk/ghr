@@ -56,7 +56,7 @@ check_gh_auth();
 
 # --- Main Logic ---
 sub get_prompt {
-    my $prompt = "ghr";
+    my $prompt = '-'x120 . "\nghr";
 
     if (defined $current_pr) {
         $prompt .= " [$current_pr]";
@@ -70,7 +70,7 @@ sub get_prompt {
             my $current_index = $current_file_index // 0;
 
             # Format the prompt segment: [1/100] filename
-            $prompt .= " [$current_index/$total_files] $current_file_name";
+            $prompt .= sprintf( " [ $current_index/$total_files | %.1f%% ] $current_file_name", 100 * ( $current_index/$total_files ) ) ;
         }
     }
 
@@ -165,8 +165,11 @@ sub cmd_list_prs {
 sub cmd_select_pr {
     my ($pr_num) = @_;
     if ($pr_num =~ /^\d+$/) {
-        # Check if PR is valid and get file list
-        my $file_list_json = `gh pr view $pr_num --json files 2>/dev/null`;
+        # Check if PR is valid and get *all* files using the API
+        # This bypasses the 100-file limit of 'gh pr view'
+        # The --jq flag filters to just the filenames, one per line.
+        my @pr_files = `gh api --paginate "repos/{owner}/{repo}/pulls/$pr_num/files" --jq ".[].filename" 2>/dev/null`;
+        
         if ($? != 0) {
             print "Error: PR #$pr_num not found or inaccessible.\n";
             return;
@@ -177,13 +180,12 @@ sub cmd_select_pr {
         $current_file_index = undef;
         $current_file_name = undef;
         %comments = (
-            'global' => [],
-            'files' => {},
+            'global'     => [],
+            'files'      => {},
             'review_state' => undef
         );
 
-        my $data = decode_json($file_list_json);
-        @pr_files = map { $_->{path} } @{$data->{files}};
+        # No longer need decode_json or map, @pr_files is now a simple list.
 
         # --- POPULATE %files_data ---
         # Iterate through the returned file paths and populate the global hash.
@@ -191,10 +193,13 @@ sub cmd_select_pr {
         my $file_count = 0;
         foreach my $file_path (@pr_files) {
             chomp $file_path;
+
+            # Trim surrounding quotes that gh/jq adds
+            $file_path =~ s/^"|"$//g;
             
-            # Trim surrounding quotes if gh/jq added them
-            $file_path =~ s/^"|"$//g; 
-            
+            # Skip empty lines if any
+            next if !$file_path;
+
             # Store the file path as a key in the global hash
             $files_data{$file_path} = 1; # Storing 1 as a placeholder status
             $file_count++;
@@ -204,7 +209,7 @@ sub cmd_select_pr {
         # my $existing_comments = `gh pr review $pr_num --json comments`;
         # ... logic to parse and load existing comments ...
 
-        print "Selected PR #$current_pr with " . scalar(@pr_files) . " files.\n";
+        print "Selected PR #$current_pr with $file_count files.\n";
 
     } else {
         print "Usage: pr <PR#>\n";
