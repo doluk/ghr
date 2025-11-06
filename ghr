@@ -3,6 +3,9 @@ use strict;
 use warnings;
 use Cwd 'abs_path';
 use JSON 'decode_json', 'encode_json';
+use JSON;
+
+# Global path for session caching
 # File::Slurp, Term::ReadLine::Gnu or similar would be needed for a richer experience,
 # but for basic CLI in emacs shell, standard IO is fine.
 
@@ -54,12 +57,14 @@ sub check_gh_auth {
 }
 check_gh_auth();
 
+cmd_load_session();
+
 # --- Main Logic ---
 sub get_prompt {
     my $prompt = '-'x120 . "\nghr";
 
     if (defined $current_pr) {
-        $prompt .= " [$current_pr]";
+        $prompt .= " \#$current_pr";
 
         # --- Add File Index and Total Count ---
         if (defined $current_file_name) {
@@ -127,6 +132,27 @@ sub cmd_quit {
         my $confirm = <STDIN>;
         return unless $confirm =~ /^[yY]/;
     }
+
+    # --- SAVE SESSION STATE ---
+    if (defined $current_pr && defined $current_file_name) {
+        my $session_file_path = get_session_file_path();
+        my $session_data = {
+            pr_num => $current_pr,
+            file_name => $current_file_name
+        };
+
+        # Use an outer scope to capture any file/JSON errors gracefully
+        eval {
+            open(my $fh, '>', $session_file_path) or die "Could not open file '$session_file_path': $!";
+            print $fh JSON->new->pretty(1)->encode($session_data);
+            close $fh;
+            print "Session state saved to $session_file_path\n";
+        };
+        if ($@) {
+            print "Warning: Failed to save session state: $@\n";
+        }
+    }
+
     exit 0;
 }
 
@@ -163,7 +189,8 @@ sub cmd_list_prs {
 }
 
 sub cmd_select_pr {
-    my ($pr_num) = @_;
+    my ($pr_num, $filenumber) = @_;
+    $filenumber = 1 if !$filenumber;
     if ($pr_num =~ /^\d+$/) {
         # Check if PR is valid and get *all* files using the API
         # This bypasses the 100-file limit of 'gh pr view'
@@ -210,7 +237,7 @@ sub cmd_select_pr {
         # ... logic to parse and load existing comments ...
 
         print "Selected PR #$current_pr with $file_count files.\n";
-
+        cmd_select_file( 1, $filenumber ) if $filenumber > 0 && $filenumber <= $file_count;
     } else {
         print "Usage: pr <PR#>\n";
     }
@@ -239,7 +266,7 @@ sub get_unpushed_comment_count {
 }
 
 sub cmd_select_file {
-    my ($arg) = @_; # $arg is now correctly '+', '-', a number, or ''
+    my ($arg, $quiet) = @_; # $arg is now correctly '+', '-', a number, or ''
 
     if (!defined $current_pr) {
         print "Error: No PR selected. Use 'pr <PR#>' first.\n";
@@ -317,7 +344,7 @@ sub cmd_select_file {
 
     # --- Run 'sd' automatically for navigation commands ---
     # This runs the diff for '+', '-', and 'sf #' commands
-    if ($is_nav_command) {
+    if ($is_nav_command && !$quiet) {
         cmd_show_diffs();
     }
 }
@@ -1263,4 +1290,71 @@ sub cmd_show_diffs_ignore_whitespace {
     # --- 4. Cleanup (Optional, but recommended) ---
     # Delete the temporary fetched reference after the diff is done.
     system("git", "update-ref", "-d", "refs/pr_temp/$current_pr");
+}
+
+sub cmd_load_session {
+    my $session_file_path = get_session_file_path();
+
+    # Check if the session file exists
+    unless (-e $session_file_path) {
+        print "No previous session found.\n";
+        return;
+    }
+
+    print "Attempting to load previous session from $session_file_path...\n";
+
+    my $data;
+    eval {
+        # Read the JSON file
+        local $/; # Enable slurp mode
+        open(my $fh, '<', $session_file_path) or die "Could not open file: $!";
+        my $json_text = <$fh>;
+        close $fh;
+
+        # Decode the JSON
+        $data = decode_json($json_text);
+    };
+
+    if ($@) {
+        print "Warning: Failed to load or parse session file: $@\n";
+        return;
+    }
+
+    # --- Restore State ---
+    my $pr_num = $data->{pr_num} // undef;
+    my $file_name = $data->{file_name} // undef;
+
+    if (defined $pr_num) {
+        print "Restoring PR #$pr_num.\n";
+
+        # We must call cmd_select_pr to populate %files_data and $current_pr
+        cmd_select_pr($pr_num, -1); # -1 prevents selecting a file
+
+        if (defined $file_name && defined $current_pr) {
+            # Find the index of the saved file name within the newly loaded file list
+            my @pr_files = sort keys %files_data;
+            my $found_index = 0;
+
+            for my $i (0 .. $#pr_files) {
+                if ($pr_files[$i] eq $file_name) {
+                    $found_index = $i + 1; # Convert 0-based to 1-based index
+                    last;
+                }
+            }
+
+            if ($found_index > 0) {
+                print "Restoring file: $file_name (index $found_index).\n";
+                # Call cmd_select_file to select the file and show the diff
+                # Note: We must call cmd_select_file with the index, not the file name
+                cmd_select_file($found_index, 1);
+            } else {
+                print "Warning: File '$file_name' not found in PR \#{$pr_num}'s file list.\n";
+            }
+        }
+    }
+}
+
+sub get_session_file_path {
+    my $home = $ENV{HOME} || $ENV{USERPROFILE} || die "Could not determine home directory (neither HOME nor USERPROFILE set)";
+    return "$home/.ghr_session.json";
 }
