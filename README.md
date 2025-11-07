@@ -13,8 +13,11 @@
   * **Efficient Navigation:** Use simple commands (`+`, `-`) to jump between changed files.
   * **File Selection:** Select files by index or full name (`sf 5`, `sf file.c`).
   * **Diff Viewing:** View diffs with standard output (`sd`) or with whitespace changes ignored (`sdiw`).
-  * **Comment Tracking:** Add positional comments (`ca`) and view pending comments (`rs`, `lc`).
-  * **Full Review Submission:** Submit a complete review with comments, marked as **APPROVE** or **REQUEST\_CHANGES** (`accept`, `reject`).
+  * **Advanced Comment Tracking:** Add positional comments (`ca`) with support for:
+    - **Single-line and multi-line comments** - Comment on a range of lines
+    - **Side-specific comments** - Comment on old code (LEFT) or new code (RIGHT) in the diff
+    - **GraphQL API** - Uses GitHub's GraphQL API for reliable, modern comment submission
+  * **Full Review Submission:** Submit a complete review with comments, marked as **APPROVE** or **REQUEST\_CHANGES** (`accept`, `reject`) using GitHub's GraphQL API.
   * **Contextual Prompt:** The prompt always shows the current PR, file index, and file name.
   * **AI Assistance:** Access the Gemini model directly to ask questions or get contextual feedback on the current file's content or diff.
 
@@ -85,12 +88,12 @@ All commands are executed from the `ghr` interactive prompt.
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
-| `ca <line> <comment>` | **Add** a positional comment to the current file. | `ca 12` |
+| `ca <line> <comment>` | **Add** a positional comment to the current file. Supports single-line, multi-line comments, and comments on both sides of the diff (old/new code). | `ca 12` |
 | `cd <pos>` | **Delete** a local comment by its position index (from `rs`). | `cd 1` |
 | `lc` | Load and display all **submitted positional review comments** from other reviewers. | `lc` |
 | `lgc` | Load and display all **general PR discussion comments** (e.g., CI/Linter reports). | `lgc` |
 | `rs` | Show a **Review Summary** of all locally tracked comments. | `rs` |
-| `cp` | **Push** all pending local comments to the PR as a draft review. | `cp` |
+| `cp` | **Push** all pending local comments to the PR using GitHub's GraphQL API. | `cp` |
 
 ### ✅ Final Submission
 

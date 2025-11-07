@@ -2,12 +2,20 @@
 use strict;
 use warnings;
 use Cwd 'abs_path';
-use JSON 'decode_json', 'encode_json';
 use JSON;
+use File::Temp 'tempfile';
+use Data::Dumper;
+use FindBin '$Bin';
+use lib $Bin;
 
 # Global path for session caching
 # File::Slurp, Term::ReadLine::Gnu or similar would be needed for a richer experience,
 # but for basic CLI in emacs shell, standard IO is fine.
+
+# --- Constants ---
+use constant {
+    MAX_MULTILINE_RANGE => 10000,  # Maximum line range for multi-line comments
+};
 
 # --- Global State ---
 my $current_pr = undef;
@@ -175,11 +183,12 @@ sd        // show diffs for selected file
 so        // show original lines for selected file (with line numbers)
 sn        // show new lines for selected file (with positional info)
 ca pos    // add comment. 'pos' is position # from 'sn', or 'g' for global.
+           // Supports single/multi-line comments on LEFT (old) or RIGHT (new) side
 cd pos    // delete comment by position # or 'g' for global.
-cp        // pushes all local comments to GitHub (asks confirmation)
+cp        // pushes all local comments to GitHub via GraphQL API (asks confirmation)
 rs        // review summary (all local and pushed comments)
-accept    // accept PR (asks confirmation, pushes comments)
-reject    // reject PR (asks confirmation, pushes comments)
+accept    // accept PR (asks confirmation, pushes comments via GraphQL)
+reject    // reject PR (asks confirmation, pushes comments via GraphQL)
 
 HELP_TEXT
 }
@@ -525,8 +534,6 @@ sub cmd_show_new {
     }
 }
 
-use Data::Dumper; # Useful for debugging the data structure
-
 sub cmd_add_comment {
     my ($args) = @_;
     my ($pos, $initial_text) = split /\s+/, $args, 2;
@@ -543,6 +550,9 @@ sub cmd_add_comment {
     my $target_type;
     my $target_key;
     my $line_num_for_push = undef; # The actual line number, needed for the gh comments.json
+    my $side = 'RIGHT'; # Default to RIGHT (new code)
+    my $start_line = undef;
+    my $end_line = undef;
 
     if ($pos eq 'g') {
         $target_type = 'global';
@@ -565,7 +575,47 @@ sub cmd_add_comment {
             return;
         }
 
-        print "Adding comment at position **$pos** (Line $line_num_for_push) in **$current_file_name**.\n";
+        # Ask for comment side (LEFT for old code, RIGHT for new code)
+        print "Comment on which side of the diff?\n";
+        print "  L/LEFT  - Comment on OLD code (removed/modified lines)\n";
+        print "  R/RIGHT - Comment on NEW code (added/modified lines) [default]\n";
+        print "Side (L/R): ";
+        my $side_input = <STDIN>;
+        chomp $side_input;
+        $side_input = uc($side_input) if defined $side_input;
+        
+        if ($side_input && ($side_input eq 'L' || $side_input eq 'LEFT')) {
+            $side = 'LEFT';
+        }
+
+        # Ask if this is a multi-line comment
+        print "\nIs this a multi-line comment? (y/N): ";
+        my $multiline_input = <STDIN>;
+        chomp $multiline_input;
+        
+        if ($multiline_input && $multiline_input =~ /^[yY]/) {
+            $start_line = $line_num_for_push;
+            print "Enter end line number (must be >= $start_line): ";
+            my $end_input = <STDIN>;
+            chomp $end_input;
+            
+            if ($end_input =~ /^\d+$/ && $end_input >= $start_line) {
+                # Additional validation: check if end line is reasonable (within a reasonable range)
+                if ($end_input - $start_line > MAX_MULTILINE_RANGE) {
+                    print "Warning: End line is very far from start line (max range is " . MAX_MULTILINE_RANGE . " lines). Using single-line comment.\n";
+                    $end_line = undef;
+                } else {
+                    $end_line = $end_input;
+                    print "Multi-line comment: lines $start_line to $end_line on $side side.\n";
+                }
+            } else {
+                print "Invalid end line. Using single-line comment.\n";
+                $end_line = undef;
+            }
+        }
+
+        my $range_desc = defined $end_line ? "lines $start_line-$end_line" : "line $line_num_for_push";
+        print "Adding comment at position **$pos** ($range_desc, $side side) in **$current_file_name**.\n";
         print "Type your comment, terminate with a '.' on a single line:\n";
     }
 
@@ -589,7 +639,10 @@ sub cmd_add_comment {
         # Only set file-specific data for positional comments
         ($target_type eq 'positional' ? (
             file => $current_file_name,
-            line => $line_num_for_push
+            line => $line_num_for_push,
+            side => $side,
+            (defined $start_line ? (start_line => $start_line) : ()),
+            (defined $end_line ? (end_line => $end_line) : ())
         ) : ())
     };
 
@@ -602,7 +655,7 @@ sub cmd_add_comment {
     my $storage = ($target_type eq 'global') ? $comments{global} : $comments{files}{$target_key};
     push @$storage, $new_comment;
 
-    print "\nComment added successfully (local: $target_type, pos: $pos).\n";
+    print "\nComment added successfully (local: $target_type, pos: $pos, side: $side).\n";
 }
 
 # --- Utility to map position to line number (CORRECTED) ---
@@ -810,9 +863,6 @@ sub cmd_review_summary {
     }
 }
 
-use JSON 'encode_json';
-use File::Temp 'tempfile';
-
 # Utility: Builds the comments.json file required by 'gh pr review'
 # Returns: The path to the temporary JSON file, or undef on error.
 sub build_comments_json {
@@ -927,6 +977,180 @@ sub _prepare_unified_body_file {
     return $temp_file;
 }
 
+# --- GraphQL Utility Functions ---
+
+# Utility: Get the GraphQL node ID for a pull request
+# Returns: The node ID (e.g., "PR_kwDOABCD1234") or undef on error
+sub _get_pr_node_id {
+    my ($pr_number) = @_;
+    
+    # Get repository owner and name
+    my $repo_info_cmd = "gh repo view --json owner,name 2>/dev/null";
+    my $repo_json = `$repo_info_cmd`;
+    
+    if ($? != 0) {
+        print "Error: Failed to get repository information.\n";
+        return undef;
+    }
+    
+    my $repo_data = eval { decode_json($repo_json); };
+    if ($@ || !$repo_data->{owner} || !$repo_data->{name}) {
+        print "Error: Failed to parse repository information.\n";
+        return undef;
+    }
+    
+    my $owner = $repo_data->{owner}->{login};
+    my $repo_name = $repo_data->{name};
+    
+    # Query for PR node ID using GraphQL
+    my $query = sprintf('{
+      repository(owner: "%s", name: "%s") {
+        pullRequest(number: %d) {
+          id
+        }
+      }
+    }', $owner, $repo_name, $pr_number);
+    
+    # Use a temporary file to avoid shell escaping issues
+    my ($fh, $temp_query_file) = tempfile("ghr_query_XXXXXX", DIR => "/tmp", UNLINK => 1);
+    print $fh $query;
+    close $fh;
+    
+    my $graphql_cmd = qq{gh api graphql -F query=\@$temp_query_file 2>/dev/null};
+    my $result_json = `$graphql_cmd`;
+    
+    if ($? != 0) {
+        print "Error: GraphQL query failed to get PR node ID.\n";
+        return undef;
+    }
+    
+    my $result = eval { decode_json($result_json); };
+    if ($@ || !$result->{data}->{repository}->{pullRequest}->{id}) {
+        print "Error: Failed to parse PR node ID from GraphQL response.\n";
+        return undef;
+    }
+    
+    return $result->{data}->{repository}->{pullRequest}->{id};
+}
+
+# Utility: Submit comments using GraphQL addPullRequestReviewThread mutation
+# This supports single-line, multi-line, and side-specific comments
+sub _submit_comments_via_graphql {
+    my ($pr_node_id, @comments_to_submit) = @_;
+    
+    return 0 unless @comments_to_submit;
+    
+    my $success_count = 0;
+    my $error_count = 0;
+    
+    # Submit each comment as a separate review thread
+    foreach my $comment (@comments_to_submit) {
+        my $mutation;
+        
+        # Build the mutation based on whether it's single-line or multi-line
+        if (defined $comment->{end_line} && $comment->{end_line} > $comment->{line}) {
+            # Multi-line comment
+            $mutation = sprintf(
+                'mutation {
+                  addPullRequestReviewThread(input: {
+                    pullRequestId: "%s",
+                    path: "%s",
+                    body: %s,
+                    line: %d,
+                    startLine: %d,
+                    side: %s
+                  }) {
+                    thread {
+                      id
+                    }
+                  }
+                }',
+                $pr_node_id,
+                $comment->{path},
+                _escape_graphql_string($comment->{body}),
+                $comment->{end_line},
+                $comment->{start_line} || $comment->{line},
+                $comment->{side}
+            );
+        } else {
+            # Single-line comment
+            $mutation = sprintf(
+                'mutation {
+                  addPullRequestReviewThread(input: {
+                    pullRequestId: "%s",
+                    path: "%s",
+                    body: %s,
+                    line: %d,
+                    side: %s
+                  }) {
+                    thread {
+                      id
+                    }
+                  }
+                }',
+                $pr_node_id,
+                $comment->{path},
+                _escape_graphql_string($comment->{body}),
+                $comment->{line},
+                $comment->{side}  # Side is already uppercase (LEFT or RIGHT)
+            );
+        }
+        
+        # Use a temporary file to avoid shell injection issues
+        my ($fh, $temp_mutation_file) = tempfile("ghr_mutation_XXXXXX", DIR => "/tmp", UNLINK => 1);
+        print $fh $mutation;
+        close $fh;
+        
+        my $graphql_cmd = qq{gh api graphql -F query=\@$temp_mutation_file 2>&1};
+        my $result = `$graphql_cmd`;
+        
+        if ($? == 0) {
+            $success_count++;
+            print "✓ Comment submitted on $comment->{path}:$comment->{line} ($comment->{side})\n";
+        } else {
+            $error_count++;
+            print "✗ Failed to submit comment on $comment->{path}:$comment->{line}: $result\n";
+        }
+    }
+    
+    return ($success_count, $error_count);
+}
+
+# Utility: Escape a string for GraphQL (JSON format)
+sub _escape_graphql_string {
+    my ($str) = @_;
+    
+    # Use JSON encoding to properly escape the string
+    my $json = JSON->new->allow_nonref;
+    return $json->encode($str);
+}
+
+# Utility: Prepare comments for GraphQL submission
+sub _prepare_comments_for_graphql {
+    my @graphql_comments = ();
+    
+    # Iterate through all files that have comments
+    foreach my $file_name (keys %{$comments{files}}) {
+        my @file_comments = @{$comments{files}{$file_name}};
+        
+        # Filter for only local, unpushed comments
+        foreach my $c (@file_comments) {
+            next unless $c->{status} eq 'local';
+            
+            push @graphql_comments, {
+                path       => $c->{file},
+                body       => $c->{text},
+                line       => $c->{line},
+                side       => $c->{side} || 'RIGHT',
+                start_line => $c->{start_line},
+                end_line   => $c->{end_line}
+            };
+        }
+    }
+    
+    return @graphql_comments;
+}
+
 sub cmd_push_comments {
     my $unpushed_count = get_unpushed_comment_count();
 
@@ -942,37 +1166,62 @@ sub cmd_push_comments {
 
     return unless $confirm =~ /^[yY]/;
     
-    my $temp_file = undef; 
+    print "\nPushing comments via GitHub GraphQL API...\n";
     
-    # --- 1. Prepare Unified Command Body ---
-    $temp_file = _prepare_unified_body_file('comment'); # Pass 'comment' review type
+    # --- 1. Get PR Node ID ---
+    print "Getting PR node ID...\n";
+    my $pr_node_id = _get_pr_node_id($current_pr);
     
-    unless (defined $temp_file) {
-        print "Error: Failed to create unified comment body file.\n";
+    unless (defined $pr_node_id) {
+        print "❌ Error: Could not retrieve PR node ID. Cannot push comments.\n";
         return;
     }
     
-    # --- 2. Execute Command (gh pr review) ---
-    # The combination of '--comment' and '--body-file' is the correct syntax
-    # for a comment-only submission without changing the review status.
-    my @cmd_parts = ("gh", "pr", "review", $current_pr, "--comment", "--body-file", $temp_file);
-
-    print "\nPushing comments via GitHub CLI...\n";
-    my $final_cmd = join(" ", map { s/ /\\ /g; $_ } @cmd_parts);
-    print "Executing: $final_cmd\n";
+    print "PR Node ID: $pr_node_id\n";
     
-    my $output = system(@cmd_parts);
-
-    # --- 3. Check Status and Cleanup ---
-    if ($output == 0) {
-        print "\n✅ Successfully pushed all $unpushed_count comment(s) to PR #$current_pr.\n";
-        _mark_local_comments_as_pushed();
-    } else {
-        print "\n❌ Error pushing comments. Check gh CLI output above. Error code: $output\n";
+    # --- 2. Prepare Comments for GraphQL ---
+    my @graphql_comments = _prepare_comments_for_graphql();
+    
+    # --- 3. Handle Global Comments (if any) ---
+    my @global_local_comments = grep { $_->{status} eq 'local' } @{$comments{global}};
+    if (@global_local_comments) {
+        print "\nNote: Global comments will be submitted as PR-level comments.\n";
+        print "Submitting " . scalar(@global_local_comments) . " global comment(s)...\n";
+        
+        foreach my $gc (@global_local_comments) {
+            # Submit global comment as a PR comment (issue comment)
+            # Use JSON encoding for proper escaping
+            my $json = JSON->new->allow_nonref;
+            my $body_escaped = $json->encode($gc->{text});
+            
+            my $cmd = qq{gh pr comment $current_pr --body $body_escaped 2>&1};
+            my $result = `$cmd`;
+            
+            if ($? == 0) {
+                print "✓ Global comment submitted\n";
+                $gc->{status} = 'pushed';
+            } else {
+                print "✗ Failed to submit global comment: $result\n";
+            }
+        }
     }
     
-    if (defined $temp_file && -e $temp_file) {
-        unlink $temp_file;
+    # --- 4. Submit Positional Comments via GraphQL ---
+    if (@graphql_comments) {
+        print "\nSubmitting " . scalar(@graphql_comments) . " positional comment(s) via GraphQL...\n";
+        
+        my ($success_count, $error_count) = _submit_comments_via_graphql($pr_node_id, @graphql_comments);
+        
+        if ($success_count > 0) {
+            print "\n✅ Successfully pushed $success_count positional comment(s) to PR #$current_pr.\n";
+            _mark_local_comments_as_pushed();
+        }
+        
+        if ($error_count > 0) {
+            print "\n⚠️  Warning: $error_count comment(s) failed to push. Review output above.\n";
+        }
+    } else {
+        print "No positional comments to submit.\n";
     }
 }
 
@@ -1021,51 +1270,106 @@ sub cmd_reject_review {
 sub _submit_review {
     my ($review_type) = @_; # 'approve' or 'request_changes'
     
-    my $temp_file = undef; 
+    print "\nSubmitting review via GitHub GraphQL API...\n";
     
-    # --- 1. Prepare Unified Command Body ---
-    $temp_file = _prepare_unified_body_file($review_type);
-
-    # If no comments and no body file, we still submit the state, but gh may fail without a body file.
-    # To be safe, we always generate a body file, even if minimal.
-    unless (defined $temp_file) {
-        # Fallback: Create a minimal body file if _prepare_unified_body_file returned undef
-        my $default_body = $review_type eq 'approve' ? "Approved." : "Changes requested.";
-        my ($fh, $filename) = tempfile("ghr_minimal_XXXXXX", DIR => "/tmp", UNLINK => 1);
-        print $fh $default_body;
-        close $fh;
-        $temp_file = $filename;
-    }
-
-    # --- 2. Execute Command ---
-    my $flag = ($review_type eq 'approve') ? '--approve' : '--request-changes';
+    # --- 1. Get PR Node ID ---
+    my $pr_node_id = _get_pr_node_id($current_pr);
     
-    my @cmd_parts = ("gh", "pr", "review", $current_pr, $flag, "--body-file", $temp_file);
-    
-    print "\nSubmitting review via GitHub CLI...\n";
-    my $final_cmd = join(" ", map { s/ /\\ /g; $_ } @cmd_parts);
-    print "Executing: $final_cmd\n";
-    
-    my $output = system(@cmd_parts);
-
-    # --- 3. Check Status and Cleanup ---
-    if ($output == 0) {
-        print "\n✅ Successfully submitted review as " . uc($review_type) . " for PR #$current_pr.\n";
-        # Mark all local comments as pushed
-        _mark_local_comments_as_pushed();
-        $comments{review_state} = uc($review_type);
-    } else {
-        # Revert state on failure
+    unless (defined $pr_node_id) {
+        print "❌ Error: Could not retrieve PR node ID. Cannot submit review.\n";
         $comments{review_state} = 'PENDING';
-        print "\n❌ Error submitting review. Check gh CLI output above. Error code: $output\n";
+        return;
     }
     
-    if (defined $temp_file && -e $temp_file) {
-        unlink $temp_file;
+    # --- 2. Prepare Review Body ---
+    my @global_local_comments = grep { $_->{status} eq 'local' } @{$comments{global}};
+    my $review_body = "";
+    
+    if (@global_local_comments) {
+        $review_body = join("\n---\n", map { "GLOBAL COMMENT:\n" . $_->{text} } @global_local_comments);
+    } else {
+        $review_body = $review_type eq 'approve' ? "Approved." : "Changes requested.";
+    }
+    
+    # --- 3. Prepare Positional Comments ---
+    my @graphql_comments = _prepare_comments_for_graphql();
+    
+    # --- 4. Build and Submit GraphQL Mutation ---
+    my $event = uc($review_type);  # 'APPROVE' or 'REQUEST_CHANGES'
+    
+    # Build the threads array for the mutation using proper JSON encoding
+    my @threads = ();
+    foreach my $comment (@graphql_comments) {
+        my $thread = {
+            path => $comment->{path},
+            body => $comment->{body},
+            line => $comment->{line},
+            side => $comment->{side}
+        };
+        
+        # Add multi-line support if needed
+        if (defined $comment->{end_line} && $comment->{end_line} > $comment->{line}) {
+            $thread->{line} = $comment->{end_line};
+            $thread->{startLine} = $comment->{start_line} || $comment->{line};
+        }
+        
+        push @threads, $thread;
+    }
+    
+    # Convert threads to GraphQL format (JSON-like but not quoted keys)
+    my $threads_graphql = "";
+    if (@threads) {
+        my $json = JSON->new->allow_nonref;
+        # First encode as JSON
+        my $threads_json = $json->encode(\@threads);
+        
+        # Then convert to GraphQL format (remove quotes from keys, wrap string values)
+        # This is a simplified approach - for complex cases, consider a GraphQL library
+        $threads_graphql = $threads_json;
+        # Remove quotes from object keys
+        $threads_graphql =~ s/"(\w+)":/$1:/g;
+        # Ensure side values are uppercase enums (not quoted strings)
+        $threads_graphql =~ s/"(LEFT|RIGHT)"/$1/g;
+    }
+    
+    # Build the full mutation
+    my $mutation = sprintf(
+        'mutation {
+          addPullRequestReview(input: {
+            pullRequestId: "%s",
+            body: %s,
+            event: %s%s
+          }) {
+            pullRequestReview {
+              id
+            }
+          }
+        }',
+        $pr_node_id,
+        _escape_graphql_string($review_body),
+        $event,
+        @threads ? ",\n            threads: $threads_graphql" : ""
+    );
+    
+    # Use a temporary file to avoid shell injection issues
+    my ($fh_mut, $temp_mutation_file) = tempfile("ghr_review_mutation_XXXXXX", DIR => "/tmp", UNLINK => 1);
+    print $fh_mut $mutation;
+    close $fh_mut;
+    
+    my $graphql_cmd = qq{gh api graphql -F query=\@$temp_mutation_file 2>&1};
+    my $result = `$graphql_cmd`;
+    
+    # --- 5. Check Result ---
+    if ($? == 0) {
+        print "\n✅ Successfully submitted review as $event for PR #$current_pr.\n";
+        _mark_local_comments_as_pushed();
+        $comments{review_state} = $event;
+    } else {
+        $comments{review_state} = 'PENDING';
+        print "\n❌ Error submitting review via GraphQL.\n";
+        print "Error output: $result\n";
     }
 }
-
-use JSON 'decode_json'; 
 
 sub cmd_load_comments {
     if (!defined $current_pr) {
@@ -1373,8 +1677,6 @@ sub get_session_file_path {
 # 3. Ensure your terminal is set to UTF-8 (though we are bypassing most of that
 #    complexity by focusing on the logic here).
 
-use FindBin '$Bin';
-use lib $Bin;
 use GeminiConverse qw(new);
 
 # ----------------------------------------------------------------------
