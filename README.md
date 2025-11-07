@@ -16,6 +16,7 @@
   * **Comment Tracking:** Add positional comments (`ca`) and view pending comments (`rs`, `lc`).
   * **Full Review Submission:** Submit a complete review with comments, marked as **APPROVE** or **REQUEST\_CHANGES** (`accept`, `reject`).
   * **Contextual Prompt:** The prompt always shows the current PR, file index, and file name.
+  * **AI Assistance:** Access the Gemini model directly to ask questions or get contextual feedback on the current file's content or diff.
 
 -----
 
@@ -36,6 +37,10 @@
 3.  **Required Perl Modules:**
     ```bash
     cpan JSON
+    ```
+4.  **Gemini API Key:** Set the `GEMINI_API_KEY` environment variable for AI features (`ajim`).
+    ```bash
+    export GEMINI_API_KEY="YOUR_API_KEY_HERE"
     ```
 
 ### Running ghr
@@ -74,6 +79,7 @@ All commands are executed from the `ghr` interactive prompt.
 | **`sdiw`** | Show the diff **ignoring whitespace** changes. | `sdiw` |
 | `so` | Show the **original** file content (before changes). | `so` |
 | `sn` | Show the **new** file content (with changes). | `sn` |
+| `ajim` | **Ask Gemini** a question about the current file, its diff, or a general coding topic. | `ajim` |
 
 ### 💬 Commenting and Review
 
