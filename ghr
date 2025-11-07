@@ -429,21 +429,34 @@ sub colorize_code {
     # Skip highlighting for binary or non-code files
     return $code_line if $ext =~ /^(png|jpg|jpeg|gif|pdf|zip|tar|gz|bz2|exe|bin)$/;
     
-    # Apply basic syntax highlighting based on common patterns
-    # Keywords (blue)
-    $code_line =~ s/\b(if|else|for|while|do|switch|case|break|continue|return|function|def|class|import|from|export|const|let|var|public|private|protected|static|void|int|char|float|double|bool|string|true|false|null|undefined|this|super|new|delete|try|catch|throw|async|await|yield)\b/colored($&, 'blue')/ge;
+    # Common keywords across multiple languages
+    my $keywords = qr/\b(?:if|else|for|while|do|switch|case|break|continue|return|function|def|class|import|from|export|const|let|var|public|private|protected|static|void|int|char|float|double|bool|string|true|false|null|undefined|this|super|new|delete|try|catch|throw|async|await|yield|struct|typedef|enum|union|sizeof|goto|volatile|register|auto|extern|inline|namespace|template|typename|using|virtual|override|final)\b/;
     
-    # Strings (yellow)
+    # Apply syntax highlighting in order of precedence
+    # 1. Comments (bright_black/grey) - must come first to avoid highlighting keywords in comments
+    $code_line =~ s/(\/\/.*$|#.*$)/colored($1, 'bright_black')/ge;
+    $code_line =~ s/(\/\*.*?\*\/)/colored($1, 'bright_black')/ge;
+    
+    # 2. Strings (yellow)
     $code_line =~ s/(["'])(?:\\.|(?!\1).)*\1/colored($&, 'yellow')/ge;
     
-    # Comments (bright_black/grey)
-    $code_line =~ s/(\/\/.*$|\/\*.*?\*\/|#.*$)/colored($&, 'bright_black')/ge;
+    # 3. Keywords (blue)
+    $code_line =~ s/$keywords/colored($&, 'blue')/ge;
     
-    # Numbers (magenta)
-    $code_line =~ s/\b(\d+\.?\d*)\b/colored($&, 'magenta')/ge;
+    # 4. Numbers (magenta)
+    $code_line =~ s/\b(\d+\.?\d*)\b/colored($1, 'magenta')/ge;
     
-    # Function calls (green) - basic pattern
-    $code_line =~ s/\b([a-zA-Z_]\w*)\s*\(/colored($1, 'green') . '('/ge;
+    # 5. Function calls (green) - exclude keywords that are already colored
+    # This pattern looks for identifiers followed by '(' that aren't keywords
+    $code_line =~ s/\b([a-zA-Z_]\w*)\s*\(/
+        my $fname = $1;
+        # Check if it's a keyword by trying to match against our keyword pattern
+        if ($fname =~ m{^(?:if|else|for|while|do|switch|case|return|try|catch|throw)$}) {
+            "$fname(";  # Don't colorize control flow keywords
+        } else {
+            colored($fname, 'green') . '(';
+        }
+    /gex;
     
     return $code_line;
 }
@@ -1361,8 +1374,14 @@ sub cmd_show_diffs_ignore_whitespace {
         $current_file_name    # File path
     );
     
-    # Capture the diff output
-    my $diff_output = `@diff_cmd_parts`;
+    # Capture the diff output safely using open with list form
+    my $diff_output = '';
+    {
+        open(my $fh, '-|', @diff_cmd_parts) or die "Failed to execute git diff: $!";
+        local $/;
+        $diff_output = <$fh>;
+        close($fh);
+    }
     
     # Colorize and print the diff
     if ($diff_output) {
