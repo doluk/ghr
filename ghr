@@ -594,8 +594,15 @@ sub cmd_add_comment {
             chomp $end_input;
             
             if ($end_input =~ /^\d+$/ && $end_input >= $start_line) {
-                $end_line = $end_input;
-                print "Multi-line comment: lines $start_line to $end_line on $side side.\n";
+                # Additional validation: check if end line is reasonable (within a reasonable range)
+                # We'll allow up to 10000 lines ahead as a sanity check
+                if ($end_input - $start_line > 10000) {
+                    print "Warning: End line is very far from start line. Using single-line comment.\n";
+                    $end_line = undef;
+                } else {
+                    $end_line = $end_input;
+                    print "Multi-line comment: lines $start_line to $end_line on $side side.\n";
+                }
             } else {
                 print "Invalid end line. Using single-line comment.\n";
                 $end_line = undef;
@@ -1002,11 +1009,12 @@ sub _get_pr_node_id {
       }
     }', $owner, $repo_name, $pr_number);
     
-    # Escape the query for shell
-    $query =~ s/"/\\"/g;
-    $query =~ s/\n/ /g;
+    # Use a temporary file to avoid shell escaping issues
+    my ($fh, $temp_query_file) = tempfile("ghr_query_XXXXXX", DIR => "/tmp", UNLINK => 1);
+    print $fh $query;
+    close $fh;
     
-    my $graphql_cmd = qq{gh api graphql -f query="$query" 2>/dev/null};
+    my $graphql_cmd = qq{gh api graphql -F query=\@$temp_query_file 2>/dev/null};
     my $result_json = `$graphql_cmd`;
     
     if ($? != 0) {
@@ -1082,15 +1090,16 @@ sub _submit_comments_via_graphql {
                 $comment->{path},
                 _escape_graphql_string($comment->{body}),
                 $comment->{line},
-                $comment->{side}
+                $comment->{side}  # Side is already uppercase (LEFT or RIGHT)
             );
         }
         
-        # Clean up the mutation for command line
-        $mutation =~ s/"/\\"/g;
-        $mutation =~ s/\n/ /g;
+        # Use a temporary file to avoid shell injection issues
+        my ($fh, $temp_mutation_file) = tempfile("ghr_mutation_XXXXXX", DIR => "/tmp", UNLINK => 1);
+        print $fh $mutation;
+        close $fh;
         
-        my $graphql_cmd = qq{gh api graphql -f query="$mutation" 2>&1};
+        my $graphql_cmd = qq{gh api graphql -F query=\@$temp_mutation_file 2>&1};
         my $result = `$graphql_cmd`;
         
         if ($? == 0) {
@@ -1340,11 +1349,12 @@ sub _submit_review {
         @threads ? ",\n            threads: $threads_graphql" : ""
     );
     
-    # Clean up mutation for command line
-    $mutation =~ s/"/\\"/g;
-    $mutation =~ s/\n/ /g;
+    # Use a temporary file to avoid shell injection issues
+    my ($fh_mut, $temp_mutation_file) = tempfile("ghr_review_mutation_XXXXXX", DIR => "/tmp", UNLINK => 1);
+    print $fh_mut $mutation;
+    close $fh_mut;
     
-    my $graphql_cmd = qq{gh api graphql -f query="$mutation" 2>&1};
+    my $graphql_cmd = qq{gh api graphql -F query=\@$temp_mutation_file 2>&1};
     my $result = `$graphql_cmd`;
     
     # --- 5. Check Result ---
