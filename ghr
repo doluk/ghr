@@ -1179,11 +1179,11 @@ sub cmd_push_comments {
         
         foreach my $gc (@global_local_comments) {
             # Submit global comment as a PR comment (issue comment)
-            my $body = $gc->{text};
-            $body =~ s/"/\\"/g;
-            $body =~ s/\n/\\n/g;
+            # Use JSON encoding for proper escaping
+            my $json = JSON->new->allow_nonref;
+            my $body_escaped = $json->encode($gc->{text});
             
-            my $cmd = qq{gh pr comment $current_pr --body "$body" 2>&1};
+            my $cmd = qq{gh pr comment $current_pr --body $body_escaped 2>&1};
             my $result = `$cmd`;
             
             if ($? == 0) {
@@ -1286,32 +1286,40 @@ sub _submit_review {
     # --- 4. Build and Submit GraphQL Mutation ---
     my $event = uc($review_type);  # 'APPROVE' or 'REQUEST_CHANGES'
     
-    # Build the threads array for the mutation
-    my $threads_json = "[";
+    # Build the threads array for the mutation using proper JSON encoding
+    my @threads = ();
     foreach my $comment (@graphql_comments) {
-        if ($threads_json ne "[") {
-            $threads_json .= ", ";
-        }
+        my $thread = {
+            path => $comment->{path},
+            body => $comment->{body},
+            line => $comment->{line},
+            side => $comment->{side}
+        };
         
-        my $thread = "{";
-        $thread .= sprintf('path: "%s", ', $comment->{path});
-        $thread .= sprintf('body: %s, ', _escape_graphql_string($comment->{body}));
-        
+        # Add multi-line support if needed
         if (defined $comment->{end_line} && $comment->{end_line} > $comment->{line}) {
-            # Multi-line comment
-            $thread .= sprintf('line: %d, ', $comment->{end_line});
-            $thread .= sprintf('startLine: %d, ', $comment->{start_line} || $comment->{line});
-        } else {
-            # Single-line comment
-            $thread .= sprintf('line: %d, ', $comment->{line});
+            $thread->{line} = $comment->{end_line};
+            $thread->{startLine} = $comment->{start_line} || $comment->{line};
         }
         
-        $thread .= sprintf('side: %s', $comment->{side});
-        $thread .= "}";
-        
-        $threads_json .= $thread;
+        push @threads, $thread;
     }
-    $threads_json .= "]";
+    
+    # Convert threads to GraphQL format (JSON-like but not quoted keys)
+    my $threads_graphql = "";
+    if (@threads) {
+        my $json = JSON->new->allow_nonref;
+        # First encode as JSON
+        my $threads_json = $json->encode(\@threads);
+        
+        # Then convert to GraphQL format (remove quotes from keys, wrap string values)
+        # This is a simplified approach - for complex cases, consider a GraphQL library
+        $threads_graphql = $threads_json;
+        # Remove quotes from object keys
+        $threads_graphql =~ s/"(\w+)":/$1:/g;
+        # Ensure side values are uppercase enums (not quoted strings)
+        $threads_graphql =~ s/"(LEFT|RIGHT)"/$1/g;
+    }
     
     # Build the full mutation
     my $mutation = sprintf(
@@ -1319,8 +1327,7 @@ sub _submit_review {
           addPullRequestReview(input: {
             pullRequestId: "%s",
             body: %s,
-            event: %s,
-            %s
+            event: %s%s
           }) {
             pullRequestReview {
               id
@@ -1330,7 +1337,7 @@ sub _submit_review {
         $pr_node_id,
         _escape_graphql_string($review_body),
         $event,
-        @graphql_comments ? "threads: $threads_json" : ""
+        @threads ? ",\n            threads: $threads_graphql" : ""
     );
     
     # Clean up mutation for command line
