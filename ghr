@@ -44,6 +44,8 @@ my %COMMANDS = (
     'rs'      => \&cmd_review_summary,
     'accept'  => \&cmd_accept_review,
     'reject'  => \&cmd_reject_review,
+    'ajim'    => \&cmd_gemini_chat,
+    'agtp'    => \&cmd_openai_chat,
 );
 
 # --- GH CLI Check ---
@@ -1357,4 +1359,98 @@ sub cmd_load_session {
 sub get_session_file_path {
     my $home = $ENV{HOME} || $ENV{USERPROFILE} || die "Could not determine home directory (neither HOME nor USERPROFILE set)";
     return "$home/.ghr_session.json";
+}
+
+#!/usr/bin/perl
+#
+# This script defines and runs the cmd_gemini_chat function, which initiates
+# a continuous, interactive, and stateful (conversational) session with the
+# Gemini API using the GeminiConverse module.
+#
+# PREREQUISITES:
+# 1. The GEMINI_API_KEY environment variable must be set.
+# 2. The GeminiConverse.pm module must be in the same directory or in PERL's @INC.
+# 3. Ensure your terminal is set to UTF-8 (though we are bypassing most of that
+#    complexity by focusing on the logic here).
+
+use FindBin '$Bin';
+use lib $Bin;
+use GeminiConverse qw(new);
+
+# ----------------------------------------------------------------------
+# cmd_gemini_chat
+#
+# Launches an interactive chat session in the terminal.
+# Arguments:
+#   - $model: (Optional) The Gemini model to use. Defaults to $DEFAULT_MODEL.
+#   - $system_prompt: (Optional) The initial persona/instruction. Defaults to $DEFAULT_SYSTEM.
+# ----------------------------------------------------------------------
+sub cmd_gemini_chat {
+    my ($arg) = @_;
+
+    # Use defaults if arguments are not provided
+    my $model         = 'gemini-2.5-flash';
+    my $system_prompt =
+        'you are a Veteran C++ Architect (ISO/IEC 14882 expert). Your sole function is to review provided code diffs. Your review must be concise, direct, and actionable, adhering strictly to C++17 standards and best practices (RAII, smart pointers, constexpr). Focus on:
+1. **Memory Safety:** Immediately flag any raw pointer use, manual memory management, or potential leaks.
+2. **Performance:** Identify inefficient loops, excessive copying, or unnecessary dynamic allocation.
+3. **Correctness:** Check for threading issues, race conditions, and undefined behavior.
+4. **Design:** Ensure proper use of polymorphism, templates, and adherence to SOLID principles where applicable.
+Suppress any introductory or conversational preambles. Get straight to the review points.';
+
+    # 1. Pre-Check and Initialization
+    unless ($ENV{GEMINI_API_KEY}) {
+        print STDERR "FATAL: GEMINI_API_KEY environment variable not set.\n";
+        return;
+    }
+
+    print "--- Starting Interactive Gemini Chat ---\n";
+    print "Model: $model\n";
+    print "Persona: '$system_prompt'\n";
+    print "Type /q or /e to end the conversation.\n\n";
+
+    # Create the conversational session object (this holds the memory)
+    my $chat = GeminiConverse->new(
+        model  => $model,
+        system => $system_prompt,
+        );
+
+    # 2. Main Chat Loop
+    while (1) {
+        # Prompt for user input
+        print "gemini > ";
+
+        # Read the line (strips the newline)
+        my $user_input = <STDIN>;
+        last unless defined $user_input; # Handle EOF (Ctrl+D)
+        chomp $user_input;
+        $user_input =~ s/^\s+|\s+$//g; # Trim whitespace
+
+        # Check for exit commands
+        if ($user_input =~ /^\/(q|e|\.)$/i) {
+            print "\nSession closed. Goodbye!\n";
+            last;
+        }
+
+        # Skip if input is empty after trimming
+        next unless length $user_input;
+
+        # 3. Get Reply and Handle Errors
+        my $reply;
+        eval {
+            $reply = $chat->reply($user_input);
+        };
+
+        if ($@) {
+            # Catch API or network errors
+            print STDERR "\n🤖 ERROR: An issue occurred during the API call.\n";
+            print STDERR "Details: $@\n\n";
+        } elsif (defined $reply) {
+            # Print the model's response
+            print "🤖 jim: $reply\n\n";
+        } else {
+            # Fallback for unexpected empty reply
+            print "🤖 jim: (I received no response from the model.)\n\n";
+        }
+    }
 }
