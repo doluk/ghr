@@ -2,12 +2,20 @@
 use strict;
 use warnings;
 use Cwd 'abs_path';
-use JSON 'decode_json', 'encode_json';
 use JSON;
+use File::Temp 'tempfile';
+use Data::Dumper;
+use FindBin '$Bin';
+use lib $Bin;
 
 # Global path for session caching
 # File::Slurp, Term::ReadLine::Gnu or similar would be needed for a richer experience,
 # but for basic CLI in emacs shell, standard IO is fine.
+
+# --- Constants ---
+use constant {
+    MAX_MULTILINE_RANGE => 10000,  # Maximum line range for multi-line comments
+};
 
 # --- Global State ---
 my $current_pr = undef;
@@ -526,8 +534,6 @@ sub cmd_show_new {
     }
 }
 
-use Data::Dumper; # Useful for debugging the data structure
-
 sub cmd_add_comment {
     my ($args) = @_;
     my ($pos, $initial_text) = split /\s+/, $args, 2;
@@ -595,9 +601,8 @@ sub cmd_add_comment {
             
             if ($end_input =~ /^\d+$/ && $end_input >= $start_line) {
                 # Additional validation: check if end line is reasonable (within a reasonable range)
-                # We'll allow up to 10000 lines ahead as a sanity check
-                if ($end_input - $start_line > 10000) {
-                    print "Warning: End line is very far from start line. Using single-line comment.\n";
+                if ($end_input - $start_line > MAX_MULTILINE_RANGE) {
+                    print "Warning: End line is very far from start line (max range is " . MAX_MULTILINE_RANGE . " lines). Using single-line comment.\n";
                     $end_line = undef;
                 } else {
                     $end_line = $end_input;
@@ -857,9 +862,6 @@ sub cmd_review_summary {
         print "------------------------------------------------------\n";
     }
 }
-
-use JSON 'encode_json';
-use File::Temp 'tempfile';
 
 # Utility: Builds the comments.json file required by 'gh pr review'
 # Returns: The path to the temporary JSON file, or undef on error.
@@ -1369,8 +1371,6 @@ sub _submit_review {
     }
 }
 
-use JSON 'decode_json'; 
-
 sub cmd_load_comments {
     if (!defined $current_pr) {
         print "Error: No PR selected. Use 'pr <PR#>' first.\n";
@@ -1677,8 +1677,6 @@ sub get_session_file_path {
 # 3. Ensure your terminal is set to UTF-8 (though we are bypassing most of that
 #    complexity by focusing on the logic here).
 
-use FindBin '$Bin';
-use lib $Bin;
 use GeminiConverse qw(new);
 
 # ----------------------------------------------------------------------
