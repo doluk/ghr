@@ -292,6 +292,22 @@ sub cmd_select_pr {
     }
 }
 
+sub cmd_list_files {
+    if (!defined $current_pr) {
+        print "No PR selected. Use 'pr <PR#>' first.\n";
+        return;
+    }
+
+    # Prefer the ordered list if available
+    my @list = @pr_files ? @pr_files : sort keys %files_data;
+    print "Files in PR #$current_pr:\n";
+    for my $i (0 .. $#list) {
+        my $status = defined $comments{files}{$list[$i]} ? "(C)" : ""; # Commented
+        print sprintf(" %2d: %s %s\n", $i + 1, $list[$i], $status);
+    }
+}
+
+
 sub cmd_select_file {
     my ($arg, $quiet) = @_;
 
