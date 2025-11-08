@@ -8,6 +8,7 @@ import { GitHubClient } from './github-client';
 import { SessionManager } from './session-manager';
 import { GeminiClient } from './gemini-client';
 import { execSync } from 'child_process';
+import { readMultilineInput, parsePositionArg, readLine } from '../utils/input';
 
 export class Commands {
   constructor(
@@ -245,64 +246,77 @@ export class Commands {
   }
 
   /**
-   * Add a comment
+   * Add a comment (supports multiline and ranges)
+   * Usage:
+   * - ca g -> file-level comment
+   * - ca 5 -> single line comment on line 5
+   * - ca 5-10 -> multi-line comment on lines 5 to 10
    */
-  addComment(args: string, _context: CommandContext): void {
+  async addComment(args: string, _context: CommandContext): Promise<void> {
     const state = this.session.getState();
-    const parts = args.split(/\s+/, 2);
-    const position = parts[0];
-    const text = parts[1] || '';
+    const parts = args.trim().split(/\s+/);
+    const posArg = parts[0] || '';
 
-    if (!position) {
-      console.log('Usage: ca <position|g> [comment text]');
-      console.log('If no comment text provided, will prompt for multiline input.');
-      return;
-    }
+    try {
+      const posInfo = parsePositionArg(posArg);
 
-    // Get comment text (interactive or from args)
-    let commentText = text;
-    if (!commentText) {
-      console.log('Enter comment (Ctrl+D to finish):');
-      // For now, we'll require the comment in the args
-      console.log('Please provide comment text in the command.');
-      return;
-    }
+      // Determine what type of comment we're adding
+      if (posInfo.type === 'global') {
+        console.log('Adding a FILE-LEVEL comment.');
+        console.log("Type your comment, terminate with a '.' on a single line:");
 
-    if (position.toLowerCase() === 'g') {
-      // Global comment
-      state.comments.global.push({
-        body: commentText,
-        status: 'local',
-      });
-      console.log('Global comment added.');
-    } else {
-      // File comment
-      if (!state.currentFileName) {
-        console.log('No file selected.');
-        return;
+        const commentText = await readMultilineInput('', '.', '');
+
+        state.comments.global.push({
+          body: commentText.trim(),
+          status: 'local',
+        });
+
+        console.log('\nFile-level comment added successfully.');
+      } else {
+        // Positional comment (single or range)
+        if (!state.currentFileName) {
+          console.log('Error: No file selected. Use "fn <#>" first.');
+          return;
+        }
+
+        if (posInfo.type === 'range') {
+          console.log(
+            `Adding multi-line comment for lines ${posInfo.start}-${posInfo.end} in ${state.currentFileName}`
+          );
+        } else {
+          console.log(
+            `Adding comment at line ${posInfo.start} in ${state.currentFileName}`
+          );
+        }
+
+        console.log("Type your comment, terminate with a '.' on a single line:");
+        const commentText = await readMultilineInput('', '.', '');
+
+        if (!state.comments.files[state.currentFileName]) {
+          state.comments.files[state.currentFileName] = [];
+        }
+
+        state.comments.files[state.currentFileName].push({
+          body: commentText.trim(),
+          path: state.currentFileName,
+          position: posInfo.start!,
+          line: posInfo.type === 'range' ? posInfo.end : posInfo.start,
+          status: 'local',
+        });
+
+        console.log('\nComment added successfully (local).');
       }
 
-      const pos = parseInt(position, 10);
-      if (isNaN(pos)) {
-        console.log('Invalid position.');
-        return;
-      }
-
-      if (!state.comments.files[state.currentFileName]) {
-        state.comments.files[state.currentFileName] = [];
-      }
-
-      state.comments.files[state.currentFileName].push({
-        body: commentText,
-        path: state.currentFileName,
-        position: pos,
-        status: 'local',
-      });
-
-      console.log(`Comment added at position ${pos} in ${state.currentFileName}`);
+      this.session.updateState(state);
+    } catch (error) {
+      console.log(`Error: ${error}`);
+      console.log('Usage: ca [position]');
+      console.log('  ca g     -> file-level comment');
+      console.log('  ca       -> file-level comment');
+      console.log('  ca 5     -> single line comment on line 5');
+      console.log('  ca 5-10  -> multi-line comment on lines 5 to 10');
     }
-
-    this.session.updateState(state);
   }
 
   /**
@@ -594,12 +608,56 @@ History:
 
     console.log(`\nPreparing to push ${unpushed} comment(s) to PR #${state.prNumber}...`);
     console.log('This will create a draft review with your comments.');
-    console.log('Type "yes" to confirm: ');
 
-    // For now, we'll skip the interactive confirmation in this version
-    console.log('\nInteractive confirmation not yet implemented.');
-    console.log('This feature will be available in the TUI version.');
-    console.log('Alternatively, use "accept" or "reject" to submit a full review.');
+    const confirm = await readLine('Type "yes" to confirm: ');
+    if (confirm.toLowerCase() !== 'yes') {
+      console.log('Push cancelled.');
+      return;
+    }
+
+    try {
+      // Collect all local comments
+      const reviewComments = [];
+
+      // Add file comments
+      for (const [, comments] of Object.entries(state.comments.files)) {
+        for (const comment of comments) {
+          if (comment.status === 'local') {
+            reviewComments.push({
+              path: comment.path,
+              position: comment.position,
+              body: comment.body,
+            });
+          }
+        }
+      }
+
+      if (reviewComments.length > 0) {
+        await this.github.submitReview(state.prNumber, {
+          event: 'COMMENT',
+          body: state.comments.global
+            .filter((c) => c.status === 'local')
+            .map((c) => c.body)
+            .join('\n\n'),
+          comments: reviewComments,
+        });
+
+        // Mark comments as pushed
+        state.comments.global.forEach((c) => {
+          if (c.status === 'local') c.status = 'pushed';
+        });
+        Object.values(state.comments.files).forEach((comments) => {
+          comments.forEach((c) => {
+            if (c.status === 'local') c.status = 'pushed';
+          });
+        });
+
+        this.session.updateState(state);
+        console.log(`\nSuccessfully pushed ${unpushed} comment(s) as draft review.`);
+      }
+    } catch (error) {
+      console.error(`Error pushing comments: ${error}`);
+    }
   }
 
   /**
@@ -701,15 +759,64 @@ History:
       console.log('No local comments to submit.');
     }
 
-    console.log('Type "yes" to confirm: ');
+    const confirm = await readLine('Type "yes" to confirm: ');
+    if (confirm.toLowerCase() !== 'yes') {
+      console.log('Review submission cancelled.');
+      return;
+    }
 
-    // For now, we'll skip the interactive confirmation
-    console.log('\nInteractive confirmation not yet implemented.');
-    console.log('This feature will be available in the TUI version.');
-    console.log('\nTo submit the review, you would need to:');
-    console.log('1. Confirm the action');
-    console.log('2. Provide an optional review body message');
-    console.log('3. The system would then call GitHub API to submit the review');
+    const reviewBody = await readLine('Optional review message (press Enter to skip): ');
+
+    try {
+      // Collect all local comments
+      const reviewComments = [];
+
+      // Add file comments
+      for (const [, comments] of Object.entries(state.comments.files)) {
+        for (const comment of comments) {
+          if (comment.status === 'local') {
+            reviewComments.push({
+              path: comment.path,
+              position: comment.position,
+              body: comment.body,
+            });
+          }
+        }
+      }
+
+      // Build review body with global comments
+      let fullBody = reviewBody || '';
+      const globalComments = state.comments.global
+        .filter((c) => c.status === 'local')
+        .map((c) => c.body);
+
+      if (globalComments.length > 0) {
+        fullBody = fullBody
+          ? fullBody + '\n\n' + globalComments.join('\n\n')
+          : globalComments.join('\n\n');
+      }
+
+      await this.github.submitReview(state.prNumber, {
+        event,
+        body: fullBody || undefined,
+        comments: reviewComments,
+      });
+
+      // Mark all comments as pushed
+      state.comments.global.forEach((c) => {
+        if (c.status === 'local') c.status = 'pushed';
+      });
+      Object.values(state.comments.files).forEach((comments) => {
+        comments.forEach((c) => {
+          if (c.status === 'local') c.status = 'pushed';
+        });
+      });
+
+      this.session.updateState(state);
+      console.log(`\nSuccessfully submitted ${event} review!`);
+    } catch (error) {
+      console.error(`Error submitting review: ${error}`);
+    }
   }
 
   /**

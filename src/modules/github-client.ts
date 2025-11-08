@@ -101,13 +101,28 @@ export class GitHubClient {
   }
 
   /**
-   * Get diff for a specific file using gh CLI
+   * Get diff for a specific file by parsing full PR diff
    */
   getDiff(prNumber: number, filename: string, ignoreWhitespace: boolean = false): string {
     try {
+      // Get full PR diff
       const wsFlag = ignoreWhitespace ? '-w ' : '';
-      const cmd = `gh pr diff ${prNumber} ${wsFlag}-- "${filename}"`;
-      return execSync(cmd, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+      const cmd = `gh pr diff ${prNumber} ${wsFlag}`;
+      const fullDiff = execSync(cmd, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+
+      // Parse the diff to extract only the section for the specific file
+      const escapedFilename = filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(
+        `(diff --git a/${escapedFilename}.*?)(?:\\ndiff --git a/|$)`,
+        's'
+      );
+      const match = fullDiff.match(regex);
+
+      if (match && match[1]) {
+        return match[1];
+      }
+
+      return `Error: Could not find diff section for file "${filename}" in PR #${prNumber}.\n`;
     } catch (error) {
       return `Error fetching diff: ${error}`;
     }

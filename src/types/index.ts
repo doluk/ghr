@@ -43,7 +43,11 @@ export interface GlobalComment extends Comment {
 export interface Review {
   event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
   body?: string;
-  comments: ReviewComment[];
+  comments: Array<{
+    path: string;
+    position: number;
+    body: string;
+  }>;
 }
 
 export interface SessionState {
