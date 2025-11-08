@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+.env
+.ghr_command_history
+.ghr_session
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
