@@ -23,21 +23,19 @@ export class GitHubClient {
     try {
       // Check if gh CLI is authenticated
       execSync('gh auth status', { stdio: 'pipe' });
-      
+
       // Get auth token from gh CLI
       const token = execSync('gh auth token', { encoding: 'utf-8' }).trim();
-      
+
       this.octokit = new Octokit({ auth: token });
-      
+
       // Get repo information
       const repoInfo = execSync('gh repo view --json owner,name', { encoding: 'utf-8' });
       const { owner, name } = JSON.parse(repoInfo);
       this.owner = owner.login;
       this.repo = name;
     } catch {
-      throw new Error(
-        'GitHub CLI is not authenticated. Please run "gh auth login" first.'
-      );
+      throw new Error('GitHub CLI is not authenticated. Please run "gh auth login" first.');
     }
   }
 

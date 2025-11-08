@@ -88,7 +88,9 @@ export class Commands {
       const marker = index + 1 === state.currentFileIndex ? '→' : ' ';
       const status = file?.status.charAt(0).toUpperCase() || '?';
       const changes = file ? `+${file.additions}/-${file.deletions}` : '';
-      console.log(`${marker} ${(index + 1).toString().padStart(4)} [${status}] ${filename.padEnd(60)} ${changes}`);
+      console.log(
+        `${marker} ${(index + 1).toString().padStart(4)} [${status}] ${filename.padEnd(60)} ${changes}`
+      );
     });
 
     console.log('-'.repeat(100));

@@ -23,12 +23,14 @@ export class GeminiClient {
   private history: GeminiMessage[] = [];
   private systemInstruction?: string;
 
-  constructor(options: {
-    apiKey?: string;
-    model?: string;
-    timeout?: number;
-    systemInstruction?: string;
-  } = {}) {
+  constructor(
+    options: {
+      apiKey?: string;
+      model?: string;
+      timeout?: number;
+      systemInstruction?: string;
+    } = {}
+  ) {
     this.apiKey = options.apiKey || process.env.GEMINI_API_KEY || '';
     if (!this.apiKey) {
       throw new Error('GEMINI_API_KEY environment variable is not set');

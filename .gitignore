@@ -10,3 +10,6 @@ dist/
 *~
 .vscode/
 .idea/
+*.tsbuildinfo
+coverage/
+.nyc_output/
