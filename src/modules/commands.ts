@@ -396,8 +396,19 @@ Viewing Files:
 
 Comments and Review:
   ca <pos> <text>  Add comment (pos = line number or 'g' for global)
+  cd <pos|g>    Delete comment by position or 'g' for global
   rs            Show review summary
-  lc            Load existing review comments (TODO)
+  lc            Load existing review comments
+  lgc           Load general PR comments
+  cp            Push comments as draft review (TODO)
+  accept        Accept PR with all comments (TODO)
+  reject        Request changes with all comments (TODO)
+
+Search:
+  g <regex>     Grep diffs for pattern
+  gl <regex>    Grep local filenames for pattern
+  g+            Select next file from grep results
+  g-            Select previous file from grep results
 
 AI Assistant:
   ajim          Ask Gemini AI about current file (requires GEMINI_API_KEY)
@@ -406,5 +417,351 @@ History:
   !!            Repeat last command
   !<n>          Repeat command number n
 `);
+  }
+
+  /**
+   * Grep diffs and select matching files
+   */
+  async grepDiffs(args: string, context: CommandContext): Promise<void> {
+    const state = this.session.getState();
+    if (!state.prNumber) {
+      console.log('No PR selected. Use "pr <#>" first.');
+      return;
+    }
+
+    if (!args.trim()) {
+      console.log('Usage: g <regexp>');
+      return;
+    }
+
+    try {
+      const regex = new RegExp(args, 'i');
+      const matchedIndices: number[] = [];
+
+      console.log(`\nSearching diffs for pattern: ${args}`);
+
+      for (let i = 0; i < context.prFiles.length; i++) {
+        const filename = context.prFiles[i];
+        const diff = this.github.getDiff(state.prNumber, filename, false);
+
+        if (regex.test(diff)) {
+          matchedIndices.push(i + 1);
+        }
+      }
+
+      if (matchedIndices.length === 0) {
+        console.log('No files found matching the pattern.');
+        return;
+      }
+
+      // Store grep results
+      this.session.updateState({
+        ...state,
+        grepSet: matchedIndices,
+        currentGrepIndex: 0,
+      });
+
+      console.log(`\nFound ${matchedIndices.length} file(s) matching '${args}':`);
+      matchedIndices.forEach((idx) => {
+        const filename = context.prFiles[idx - 1];
+        console.log(`  ${idx.toString().padStart(4)} : ${filename}`);
+      });
+
+      // Select first match
+      console.log('\nSelecting first matching file.');
+      await this.selectFile(String(matchedIndices[0]), context);
+    } catch (error) {
+      console.log(`Invalid regex or error: ${error}`);
+    }
+  }
+
+  /**
+   * Grep local files
+   */
+  async grepLocal(args: string, context: CommandContext): Promise<void> {
+    const state = this.session.getState();
+    if (!state.prNumber) {
+      console.log('No PR selected. Use "pr <#>" first.');
+      return;
+    }
+
+    if (!args.trim()) {
+      console.log('Usage: gl <regexp>');
+      return;
+    }
+
+    try {
+      const regex = new RegExp(args, 'i');
+      const matchedIndices: number[] = [];
+
+      console.log(`\nSearching local files for pattern: ${args}`);
+
+      context.prFiles.forEach((filename, index) => {
+        if (regex.test(filename)) {
+          matchedIndices.push(index + 1);
+        }
+      });
+
+      if (matchedIndices.length === 0) {
+        console.log('No files found matching the pattern.');
+        return;
+      }
+
+      // Store grep results
+      this.session.updateState({
+        ...state,
+        grepSet: matchedIndices,
+        currentGrepIndex: 0,
+      });
+
+      console.log(`\nFound ${matchedIndices.length} file(s) matching '${args}':`);
+      matchedIndices.forEach((idx) => {
+        const filename = context.prFiles[idx - 1];
+        console.log(`  ${idx.toString().padStart(4)} : ${filename}`);
+      });
+
+      // Select first match
+      console.log('\nSelecting first matching file.');
+      await this.selectFile(String(matchedIndices[0]), context);
+    } catch (error) {
+      console.log(`Invalid regex or error: ${error}`);
+    }
+  }
+
+  /**
+   * Select next file from grep results
+   */
+  async grepNext(context: CommandContext): Promise<void> {
+    const state = this.session.getState();
+
+    if (!state.grepSet || state.grepSet.length === 0) {
+      console.log('No grep results. Use "g <regexp>" first.');
+      return;
+    }
+
+    const currentIdx = state.currentGrepIndex ?? 0;
+    const nextIdx = (currentIdx + 1) % state.grepSet.length;
+
+    this.session.updateState({
+      ...state,
+      currentGrepIndex: nextIdx,
+    });
+
+    const fileIndex = state.grepSet[nextIdx];
+    await this.selectFile(String(fileIndex), context);
+  }
+
+  /**
+   * Select previous file from grep results
+   */
+  async grepPrev(context: CommandContext): Promise<void> {
+    const state = this.session.getState();
+
+    if (!state.grepSet || state.grepSet.length === 0) {
+      console.log('No grep results. Use "g <regexp>" first.');
+      return;
+    }
+
+    const currentIdx = state.currentGrepIndex ?? 0;
+    const prevIdx = currentIdx === 0 ? state.grepSet.length - 1 : currentIdx - 1;
+
+    this.session.updateState({
+      ...state,
+      currentGrepIndex: prevIdx,
+    });
+
+    const fileIndex = state.grepSet[prevIdx];
+    await this.selectFile(String(fileIndex), context);
+  }
+
+  /**
+   * Push comments to GitHub as draft review
+   */
+  async pushComments(): Promise<void> {
+    const state = this.session.getState();
+    if (!state.prNumber) {
+      console.log('No PR selected.');
+      return;
+    }
+
+    const unpushed = this.session.getUnpushedCommentCount();
+    if (unpushed === 0) {
+      console.log('No unpushed comments to push.');
+      return;
+    }
+
+    console.log(`\nPreparing to push ${unpushed} comment(s) to PR #${state.prNumber}...`);
+    console.log('This will create a draft review with your comments.');
+    console.log('Type "yes" to confirm: ');
+
+    // For now, we'll skip the interactive confirmation in this version
+    console.log('\nInteractive confirmation not yet implemented.');
+    console.log('This feature will be available in the TUI version.');
+    console.log('Alternatively, use "accept" or "reject" to submit a full review.');
+  }
+
+  /**
+   * Load existing review comments
+   */
+  async loadComments(): Promise<void> {
+    const state = this.session.getState();
+    if (!state.prNumber) {
+      console.log('No PR selected.');
+      return;
+    }
+
+    try {
+      console.log(`Loading review comments for PR #${state.prNumber}...`);
+      const comments = await this.github.getReviewComments(state.prNumber);
+
+      console.log(`\nFound ${comments.length} review comment(s):\n`);
+
+      // Group by file
+      const byFile: Record<string, typeof comments> = {};
+      comments.forEach((c) => {
+        if (!byFile[c.path]) {
+          byFile[c.path] = [];
+        }
+        byFile[c.path].push(c);
+      });
+
+      // Display
+      Object.entries(byFile).forEach(([file, fileComments]) => {
+        console.log(`${file}:`);
+        fileComments.forEach((c) => {
+          console.log(`  Line ${c.line || c.position}: ${c.body}`);
+          console.log(`    by ${c.createdAt?.toLocaleString() || 'unknown'}`);
+        });
+        console.log();
+      });
+    } catch (error) {
+      console.error(`Error loading comments: ${error}`);
+    }
+  }
+
+  /**
+   * Load general PR comments (issue comments)
+   */
+  async loadGeneralComments(): Promise<void> {
+    const state = this.session.getState();
+    if (!state.prNumber) {
+      console.log('No PR selected.');
+      return;
+    }
+
+    try {
+      console.log(`Loading general comments for PR #${state.prNumber}...`);
+      const comments = await this.github.getIssueComments(state.prNumber);
+
+      console.log(`\nFound ${comments.length} general comment(s):\n`);
+
+      comments.forEach((c) => {
+        console.log(`[${c.user}] at ${c.createdAt.toLocaleString()}:`);
+        console.log(c.body);
+        console.log('-'.repeat(80));
+      });
+    } catch (error) {
+      console.error(`Error loading comments: ${error}`);
+    }
+  }
+
+  /**
+   * Submit review as APPROVE
+   */
+  async acceptReview(): Promise<void> {
+    await this.submitReview('APPROVE');
+  }
+
+  /**
+   * Submit review as REQUEST_CHANGES
+   */
+  async rejectReview(): Promise<void> {
+    await this.submitReview('REQUEST_CHANGES');
+  }
+
+  /**
+   * Submit a review
+   */
+  private async submitReview(event: 'APPROVE' | 'REQUEST_CHANGES'): Promise<void> {
+    const state = this.session.getState();
+    if (!state.prNumber) {
+      console.log('No PR selected.');
+      return;
+    }
+
+    const unpushed = this.session.getUnpushedCommentCount();
+    const action = event === 'APPROVE' ? 'approve' : 'request changes for';
+
+    console.log(`\nPreparing to ${action} PR #${state.prNumber}...`);
+    if (unpushed > 0) {
+      console.log(`This will submit ${unpushed} local comment(s).`);
+    } else {
+      console.log('No local comments to submit.');
+    }
+
+    console.log('Type "yes" to confirm: ');
+
+    // For now, we'll skip the interactive confirmation
+    console.log('\nInteractive confirmation not yet implemented.');
+    console.log('This feature will be available in the TUI version.');
+    console.log('\nTo submit the review, you would need to:');
+    console.log('1. Confirm the action');
+    console.log('2. Provide an optional review body message');
+    console.log('3. The system would then call GitHub API to submit the review');
+  }
+
+  /**
+   * Delete a comment
+   */
+  deleteComment(args: string): void {
+    const state = this.session.getState();
+    const parts = args.trim().toLowerCase();
+
+    if (!parts) {
+      console.log('Usage: cd <position|g>');
+      return;
+    }
+
+    if (parts === 'g') {
+      // Delete last global comment
+      if (state.comments.global.length === 0) {
+        console.log('No global comments to delete.');
+        return;
+      }
+      state.comments.global.pop();
+      console.log('Deleted last global comment.');
+    } else {
+      // Delete file comment by position
+      const pos = parseInt(parts, 10);
+      if (isNaN(pos)) {
+        console.log('Invalid position.');
+        return;
+      }
+
+      if (!state.currentFileName) {
+        console.log('No file selected.');
+        return;
+      }
+
+      const fileComments = state.comments.files[state.currentFileName];
+      if (!fileComments || fileComments.length === 0) {
+        console.log('No comments for this file.');
+        return;
+      }
+
+      if (pos < 1 || pos > fileComments.length) {
+        console.log(`Invalid position. Valid range: 1-${fileComments.length}`);
+        return;
+      }
+
+      fileComments.splice(pos - 1, 1);
+      console.log(`Deleted comment at position ${pos}.`);
+
+      if (fileComments.length === 0) {
+        delete state.comments.files[state.currentFileName];
+      }
+    }
+
+    this.session.updateState(state);
   }
 }

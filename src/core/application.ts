@@ -88,7 +88,19 @@ export class Application {
 
     // Comment commands
     this.parser.register('ca', (args) => this.commands.addComment(args, this.context));
+    this.parser.register('cd', (args) => this.commands.deleteComment(args));
     this.parser.register('rs', () => this.commands.showReviewSummary());
+    this.parser.register('lc', () => this.commands.loadComments());
+    this.parser.register('lgc', () => this.commands.loadGeneralComments());
+    this.parser.register('cp', () => this.commands.pushComments());
+    this.parser.register('accept', () => this.commands.acceptReview());
+    this.parser.register('reject', () => this.commands.rejectReview());
+
+    // Grep commands
+    this.parser.register('g', (args) => this.commands.grepDiffs(args, this.context));
+    this.parser.register('gl', (args) => this.commands.grepLocal(args, this.context));
+    this.parser.register('g+', () => this.commands.grepNext(this.context));
+    this.parser.register('g-', () => this.commands.grepPrev(this.context));
 
     // AI commands
     this.parser.register('ajim', () => this.commands.askGemini(this.context));
