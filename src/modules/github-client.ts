@@ -105,8 +105,8 @@ export class GitHubClient {
    */
   getDiff(prNumber: number, filename: string, ignoreWhitespace: boolean = false): string {
     try {
-      const wsFlag = ignoreWhitespace ? '-w' : '';
-      const cmd = `gh pr diff ${prNumber} ${wsFlag} -- "${filename}"`;
+      const wsFlag = ignoreWhitespace ? '-w ' : '';
+      const cmd = `gh pr diff ${prNumber} ${wsFlag}-- "${filename}"`;
       return execSync(cmd, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
     } catch (error) {
       return `Error fetching diff: ${error}`;
