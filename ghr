@@ -4,6 +4,7 @@ use warnings;
 use Cwd 'abs_path';
 use JSON 'decode_json', 'encode_json';
 use JSON;
+use Term::ANSIColor qw(colored);
 
 # Global path for session caching
 # File::Slurp, Term::ReadLine::Gnu or similar would be needed for a richer experience,
@@ -436,11 +437,89 @@ sub get_file_diff_content {
     return undef, "Error: Could not find diff section for file **$target_file** in PR #$current_pr.\n";
 }
 
+# --- Utility: Colorize diff output ---
+sub colorize_diff {
+    my ($diff) = @_;
+    my @lines = split /\n/, $diff;
+    my @colorized;
+    
+    foreach my $line (@lines) {
+        # Diff headers (diff --git, index, +++, ---)
+        if ($line =~ /^(diff --git|index|---|\+\+\+|@@)/) {
+            push @colorized, colored($line, 'cyan');
+        }
+        # Added lines
+        elsif ($line =~ /^\+/) {
+            push @colorized, colored($line, 'green');
+        }
+        # Removed lines
+        elsif ($line =~ /^-/) {
+            push @colorized, colored($line, 'red');
+        }
+        # File mode changes, new/deleted file
+        elsif ($line =~ /^(new file mode|deleted file mode|similarity index|rename)/) {
+            push @colorized, colored($line, 'yellow');
+        }
+        # Context lines
+        else {
+            push @colorized, $line;
+        }
+    }
+    
+    return join("\n", @colorized);
+}
+
+# --- Utility: Apply basic syntax highlighting to code ---
+sub colorize_code {
+    my ($code_line, $filename) = @_;
+    
+    # Determine file extension
+    my $ext = '';
+    if ($filename =~ /\.([^.]+)$/) {
+        $ext = lc($1);
+    }
+    
+    # Skip highlighting for binary or non-code files
+    return $code_line if $ext =~ /^(png|jpg|jpeg|gif|pdf|zip|tar|gz|bz2|exe|bin)$/;
+    
+    # Common keywords across multiple languages
+    my $keywords = qr/\b(?:if|else|for|while|do|switch|case|break|continue|return|function|def|class|import|from|export|const|let|var|public|private|protected|static|void|int|char|float|double|bool|string|true|false|null|undefined|this|super|new|delete|try|catch|throw|async|await|yield|struct|typedef|enum|union|sizeof|goto|volatile|register|auto|extern|inline|namespace|template|typename|using|virtual|override|final)\b/;
+    
+    # Apply syntax highlighting in order of precedence
+    # 1. Comments (bright_black/grey) - must come first to avoid highlighting keywords in comments
+    $code_line =~ s/(\/\/.*$|#.*$)/colored($1, 'bright_black')/ge;
+    $code_line =~ s/(\/\*.*?\*\/)/colored($1, 'bright_black')/ge;
+    
+    # 2. Strings (yellow)
+    $code_line =~ s/(["'])(?:\\.|(?!\1).)*\1/colored($&, 'yellow')/ge;
+    
+    # 3. Keywords (blue)
+    $code_line =~ s/$keywords/colored($&, 'blue')/ge;
+    
+    # 4. Numbers (magenta)
+    $code_line =~ s/\b(\d+\.?\d*)\b/colored($1, 'magenta')/ge;
+    
+    # 5. Function calls (green) - exclude keywords that are already colored
+    # This pattern looks for identifiers followed by '(' that aren't keywords
+    $code_line =~ s/\b([a-zA-Z_]\w*)\s*\(/
+        my $fname = $1;
+        # Check if it's a keyword by trying to match against our keyword pattern
+        if ($fname =~ m{^(?:if|else|for|while|do|switch|case|return|try|catch|throw)$}) {
+            "$fname(";  # Don't colorize control flow keywords
+        } else {
+            colored($fname, 'green') . '(';
+        }
+    /gex;
+    
+    return $code_line;
+}
+
+
 sub cmd_show_diffs {
     # Call without argument uses $current_file_name
     my ($diff, $err) = get_file_diff_content(); 
     if ($err) { print $err; return; }
-    print "$diff\n";
+    print colorize_diff($diff) . "\n";
 }
 
 sub cmd_show_original {
@@ -490,7 +569,9 @@ sub cmd_show_original {
         elsif ($line =~ /^-/) {
             # Only print if this is NOT a new file (i.e., if it's a removal or modification)
             if (!$is_new_file) {
-                print sprintf("%4d: %s\n", $original_line, substr($line, 1));
+                my $code_line = substr($line, 1);
+                my $highlighted = colorize_code($code_line, $current_file_name);
+                print sprintf("%4d: %s\n", $original_line, $highlighted);
             }
             $original_line++;
             next;
@@ -548,7 +629,9 @@ sub cmd_show_new {
             $new_line++;
             $position++;
             # For context lines, print only for reference, not for commenting
-            print sprintf("%4s:%4d: %s\n", '', $new_line, substr($line, 1));
+            my $code_line = substr($line, 1);
+            my $highlighted = colorize_code($code_line, $current_file_name);
+            print sprintf("%4s:%4d: %s\n", '', $new_line, $highlighted);
             next;
         }
 
@@ -557,14 +640,18 @@ sub cmd_show_new {
             # Removed lines *do* increment position, but cannot be commented on directly
             $position++;
             # For removed lines, print only for reference
-            print sprintf("%4s:%4s: %s\n", '', '-', substr($line, 1));
+            my $code_line = substr($line, 1);
+            my $highlighted = colorize_code($code_line, $current_file_name);
+            print sprintf("%4s:%4s: %s\n", '', colored('-', 'red'), $highlighted);
             next;
         }
 
         # New (Added) line: starts with '+'
         elsif ($line =~ /^\+/) {
             # Only + lines get comment positions
-            print sprintf("%4d:%4d: %s\n", $position, $new_line, substr($line, 1));
+            my $code_line = substr($line, 1);
+            my $highlighted = colorize_code($code_line, $current_file_name);
+            print sprintf("%4d:%4d: %s\n", $position, $new_line, $highlighted);
             $new_line++;
             $position++;
             next;
@@ -1335,7 +1422,21 @@ sub cmd_show_diffs_ignore_whitespace {
         $current_file_name    # File path
     );
     
-    system(@diff_cmd_parts);
+    # Capture the diff output safely using open with list form
+    my $diff_output = '';
+    {
+        open(my $fh, '-|', @diff_cmd_parts) or die "Failed to execute git diff: $!";
+        local $/;
+        $diff_output = <$fh>;
+        close($fh);
+    }
+    
+    # Colorize and print the diff
+    if ($diff_output) {
+        print colorize_diff($diff_output) . "\n";
+    } else {
+        print "No differences found (whitespace changes ignored).\n";
+    }
     
     # --- 4. Cleanup (Optional, but recommended) ---
     # Delete the temporary fetched reference after the diff is done.
